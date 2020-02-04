@@ -1,0 +1,140 @@
+# ### Magic Commands for CDH
+# Bang shell commands are handy, we can improve readability while interaction with CDH command line applications by employing python magic functions found in [init/cdh_magic.py](../files/init/cdh_magic.py). We'll create inline magics for the following popular CDH client applications:
+# * **hive** - run commands in hive
+# * **sql** - returns a DataFrame from SQL
+# * **sql_show** - show up to 50 records
+# * **sql_display** - display up to 50 records
+#
+# **NOTE**: sql_display address part of a comment from Tristan on options how to make tables print pretty... doesn't address table scrolling, but could be improved to via another python lib.
+execfile("init/cdh_magic.py")
+# We'll evaluate each of these separately. For now, recognize that these commands have been added to our environment and will improve iterations and readablity for the user.
+
+
+#---
+# ### Startup Comments
+#
+!ls -la .ipython/profile_default/startup
+
+# # German Credit Analysis
+# **Decscription:** This analysis will show a simple cdw pyspark integrated notebook using the popular [German Credit Data](https://archive.ics.uci.edu/ml/datasets/Statlog+%28German+Credit+Data%29) source.
+#
+# **Objective / Business Value:** Modeling Credit approvel, will provide business with more accurate in process approval foraceasts. Sensitivity analyses will allow for improved target marketing.
+#
+# **Workflow:** For our German Credit Data analysis, we are going to ingest the data in csv format, convert to parquet using hive, evaluate the data using spark and write our results to hdfs. ![workflow](img/workflow.png)
+
+#---
+# ## Add German Credit Data to HDFS
+# Provided for this analysis is some comma delimited credit data which we will explore. Typically you would either have to goto shell or Hue to load, however we will demonstrate doing the same calling shell from your python notebook.
+
+!hdfs dfs -rm -r -skipTrash /user/hive/warehouse/german
+!hdfs dfs -mkdir /user/hive/warehouse/german
+%hdfs dfs -put ./data/german_credit.csv /user/hive/warehouse/german
+%hdfs dfs -ls /user/hive/warehouse/german
+
+#---
+# ## Add Table Schemas to german data
+# Now that we have the data loaded, we'll go ahead and put a table on it. And becuase we'd like to have our data in an ideal format for analysis, we'll go ahead and also create a copy that is in parquet snappy format.
+# The schemas we'll be using are found in [sql/CREATE_TABLE_german.hql](../files/sql/CREATE_TABLE_german.hql).
+%hive -f sql/CREATE_TABLE_german.hql
+
+
+#---
+# ## Interactive pySpark Session
+# We now want to create an interactive spark session. This particular script I will run by calling the script in it's entirety. Likely in the future, this would be better done by having a function that is imported in the startup (I'm still deciding what's best).
+# NOTE: In recent exchange w/ Sean O. we wanted a way to provide the user with a link to the spark history UI & also wanted versions in the session log so this script includes all three; sc initialization, UI links, versions.
+execfile("init/spark2_init.py")
+
+#---
+# ## Providing context of data
+# Since presenting most analyses also requires orienting users to the data, many times it's adviable to summarize the data sets.
+# In jupyter this is typically done using inline md tables. In CDW, the best I've come up with is displaying a separate source. In this case I've chosen to just use HTML. Check it out after a summary of the analysis.
+# **NOTE:** If displaying html is common pattern for a notebook it should be wrapped in a function or magic.
+#
+#  It is a popular dataset for binary classification with categorical data. Since the original data set was in German, we are providing comperable engligh column names, identify if the field is continuous or categorical, and the number of categories if categorical.
+f = open("html/credit_description.html","r"); credit_desc = f.read(); f.close();
+display(HTML(credit_desc))
+
+#---
+# ## Read data in HDFS into spark context
+# Going through the trouble of putting the schema on our data is now going to pay off. We can simple read the table into a spark dataframe via the following:
+dat = sqlCtx.sql('SELECT * FROM german')
+dat.printSchema()
+
+#---
+# ## Read Analysis from pySpark submit script
+# Now we want to run our model. However writting all the code to screen will be a little cumbersome.
+# So instead what we will do is add our pyspark code in the sys path and treat as a library.
+# This is helpful, because now this notebook is reading directly from the spark-submit script we will use in production.
+sys.path.insert(1, './py')
+import german_model
+
+# **NOTE:** It is a likely iteration pattern that we will want to make changes to german_model and want to reload:
+reload(german_model)
+
+#--- 
+# German Model functions
+# Ideally if you are going to reference a class you should talk about the functions you will be using. In this extremely simple example this will be:
+# * **german_lp:** Map function to convert our dataframe into labeled point form
+# * **train_decision_tree(lp):** Taking labled point form as an arg, trains a model
+
+#---
+# ## Data cleaning & formatting (german_lp)
+# Our data source was fortunately well documented with fully populated records (this will not always be the case). However, there are some modifications that we will consistently need to make to data to prepare it for MLlib functions.
+# This map function is
+
+# ### Modify field data and type
+# More specifically make sure that the fields are converted into a form that is expected by Spark MLlib. In our example we will be running a classification decision tree where many of the fields are categorical. The standard form expected by mllib.tree is that the index starts at zero. Further we need to be sure that fields consistently map to the same number to ensure that the model is being applied appropriately. Luckily, this category to number mapping was already done for use with a small exception; in some fields the categories increment starting from 1 however, mllib.tree expects them to increment from 0.
+
+# ### Modify row type
+# This row type, is really to put data into an object that is serializable and performs well. Additionally, the row type inherently identifies which column is considered the response or 'label' for the record, which is necessary information when working with supervised learning algorithms. The row form is called a LabeledPoint. The expected RDD used in MLlib is an RDD of LabeledPoints.
+
+
+# ### A transform function for LabeledPoints
+def german_lp(x):
+    vals=x.asDict()
+    label=vals['cred']
+    feats=[vals['acct_bal']-1,
+           vals['dur_cred'],
+           vals['pay_stat'],
+           vals['purpose'],
+           vals['cred_amt'],
+           vals['value']-1,
+           vals['len_emp']-1,
+           vals['install_pc']-1,
+           vals['sex_married']-1,
+           vals['guarantors']-1,
+           vals['dur_addr']-1,
+           vals['max_val']-1,
+           vals['age'],
+           vals['concurr']-1,
+           vals['typ_aprtmnt']-1,
+           vals['no_creds']-1,
+           vals['occupation']-1,
+           vals['no_dep']-1,
+           vals['telephone']-1,
+           vals['foreign_wkr']-1]
+    return LabeledPoint(label, feats)
+
+
+lp = dat.rdd.map(german_lp).cache()
+lp.take(3)
+
+# Train out model (TODO: describe arguments)
+german_cfi = {0:4,5:5,6:5,7:4,8:4,9:3,10:4,11:4,13:3,14:3,15:4,16:4,17:2,18:2,19:2}
+model = DecisionTree.trainClassifier(lp, numClasses=2,
+                                         categoricalFeaturesInfo=german_cfi,
+                                         impurity='gini',
+                                         maxDepth=3, 
+                                         maxBins=5) 
+
+# Here are the results of our model (TODO: rewrite to include named labels)
+print(model.toDebugString())
+
+# Show training error
+predictions = model.predict(lp.map(lambda x: x.features))
+labelsAndPredictions = lp.map(lambda lp: lp.label).zip(predictions)
+trainErr = labelsAndPredictions.filter(lambda (v, p): v != p).count() / float(lp.count())
+
+# Here is our training error for the model
+print(trainErr)
+

@@ -1,0 +1,8 @@
+R
+.local
+.julia
+node_modules
+.pip
+.cache
+.config
+.butterfly

@@ -1,0 +1,5 @@
+tensorflow==1.4.1
+h5py
+keras
+Pillow
+pandas
